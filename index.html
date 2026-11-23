@@ -239,6 +239,7 @@
   .cal-day.lv3 { background: var(--done); color: #fff; }
   .cal-day.today { font-weight: 700; border-color: var(--accent); }
   .cal-day.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .cal-day.future { border: 1px dashed var(--line); }
 
   /* タイマー */
   .timer-btn { width: auto; padding: 0 8px; font-size: 13px; white-space: nowrap; color: var(--accent); }
@@ -333,7 +334,7 @@
       <select id="todo-goal" class="sel" aria-label="関連する目標" style="flex: none; width: 110px;"></select>
       <button class="btn" type="submit" style="flex: none;">追加</button>
     </form>
-    <p class="muted" style="margin: 10px 0 0;">ToDoはその日だけのタスクです。達成率には含まれません。</p>
+    <p class="muted" style="margin: 10px 0 0;">未完了のToDoは、完了するまで次の日以降に持ち越されます。未来の日を選んで、先にToDoを追加することもできます。達成率には含まれません。</p>
   </section>
 
   <section class="card">
@@ -573,7 +574,9 @@
     const rate = rateOf(key) ?? 0;
 
     document.getElementById("today-label").textContent = labelOf(key);
-    document.getElementById("habit-title").textContent = isToday ? "今日の習慣" : "この日の習慣";
+    const isFuture = key > todayKey();
+    document.getElementById("habit-title").textContent =
+      isToday ? "今日の習慣" : isFuture ? "未来の日の習慣（完了はできません）" : "この日の習慣";
     document.getElementById("to-today").hidden = isToday;
 
     document.getElementById("rate").textContent = `${rate}%`;
@@ -648,7 +651,7 @@
   // ---------- 描画: ToDo ----------
   function renderTodos() {
     const key = selectedKey;
-    const todos = (state.todos[key] || []).filter(t => goalFilter === "all" || t.goalId === goalFilter);
+    const todos = todosFor(key).filter(t => goalFilter === "all" || t.goalId === goalFilter);
     document.getElementById("todo-title").textContent = key === todayKey() ? "今日のToDo" : "この日のToDo";
 
     const list = document.getElementById("todo-list");
@@ -659,15 +662,22 @@
     }
     todos.forEach(t => {
       const row = document.createElement("div");
-      row.className = "habit" + (t.done ? " done" : "");
+      const done = isDoneOn(t, t.from, key);
+      row.className = "habit" + (done ? " done" : "");
 
       const check = document.createElement("span");
       check.className = "check";
-      check.textContent = t.done ? "✓" : "";
+      check.textContent = done ? "✓" : "";
 
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = t.name;
+      if (t.from !== key) {
+        const carried = document.createElement("span");
+        carried.className = "tag";
+        carried.textContent = `（${shortLabel(t.from)}から）`;
+        name.append(carried);
+      }
 
       const goal = state.goals.find(g => g.id === t.goalId);
       if (goal) {
@@ -677,8 +687,8 @@
         name.append(tag);
       }
 
-      row.append(check, name, miniButton("✕", false, () => removeTodo(t.id), "del"));
-      row.addEventListener("click", () => toggleTodo(t.id));
+      row.append(check, name, miniButton("✕", false, () => removeTodo(t.id, t.from), "del"));
+      row.addEventListener("click", () => toggleTodo(t.id, t.from));
       list.append(row);
     });
   }
@@ -998,9 +1008,9 @@
     const firstWeekday = new Date(viewYear, viewMonth, 1).getDay();
 
     document.getElementById("cal-title").textContent = `${viewYear}年${viewMonth + 1}月`;
-    // 今月より先の月には進めない
+    // 3か月先まで選べる（先の日にToDoを入れておけるように）
     document.getElementById("next-month").disabled =
-      viewYear * 12 + viewMonth >= now.getFullYear() * 12 + now.getMonth();
+      viewYear * 12 + viewMonth >= now.getFullYear() * 12 + now.getMonth() + 3;
 
     const grid = document.getElementById("cal-grid");
     grid.innerHTML = "";
@@ -1021,7 +1031,7 @@
       if (level) btn.classList.add(`lv${level}`);
       if (key === todayStr) btn.classList.add("today");
       if (key === selectedKey) btn.classList.add("sel");
-      btn.disabled = key > todayStr;
+      if (key > todayStr) btn.classList.add("future");
       btn.addEventListener("click", () => selectDay(key));
       grid.append(btn);
     }
@@ -1035,7 +1045,6 @@
   }
 
   function selectDay(key) {
-    if (key > todayKey()) return;
     selectedKey = key;
     const [y, m] = key.split("-").map(Number);
     viewYear = y;
@@ -1157,6 +1166,8 @@
   // ---------- 操作: 習慣 ----------
   function toggle(id) {
     const key = selectedKey;
+    // 未来の日は、まだ完了できない
+    if (key > todayKey()) return;
     state.records[key] = state.records[key] || {};
     if (state.records[key][id]) {
       delete state.records[key][id];
@@ -1237,16 +1248,43 @@
   }
 
   // ---------- 操作: ToDo ----------
-  function toggleTodo(id) {
-    const t = (state.todos[selectedKey] || []).find(x => x.id === id);
+  // その日に完了しているToDoか（完了日が無いものは、作成した日を完了日とみなす）
+  function isDoneOn(t, from, key) {
+    if (!t.done) return false;
+    return (t.doneOn || from) <= key;
+  }
+
+  // その日に表示するToDo: その日のToDo ＋ それ以前から、まだ完了していないToDo（持ち越し）
+  function todosFor(key) {
+    const list = [];
+    Object.keys(state.todos).forEach(from => {
+      if (from > key) return;
+      (state.todos[from] || []).forEach(t => {
+        // その日より前に完了していたものは、持ち越さない
+        if (t.done && (t.doneOn || from) < key) return;
+        list.push({ ...t, from });
+      });
+    });
+    return list;
+  }
+
+  function toggleTodo(id, from) {
+    if (selectedKey > todayKey()) return;
+    const t = (state.todos[from] || []).find(x => x.id === id);
     if (!t) return;
-    t.done = !t.done;
+    if (isDoneOn(t, from, selectedKey)) {
+      t.done = false;
+      delete t.doneOn;
+    } else {
+      t.done = true;
+      t.doneOn = selectedKey;
+    }
     save();
     render();
   }
 
-  function removeTodo(id) {
-    state.todos[selectedKey] = (state.todos[selectedKey] || []).filter(x => x.id !== id);
+  function removeTodo(id, from) {
+    state.todos[from] = (state.todos[from] || []).filter(x => x.id !== id);
     save();
     render();
   }
