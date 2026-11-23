@@ -274,7 +274,11 @@
     b.hidden = false;
     b.textContent = "エラー: " + msg;
   }
-  window.addEventListener("error", e => showError(`${e.message} (${e.lineno}行目)`));
+  window.addEventListener("error", e => {
+    // 共有シートなど、ページの外で起きた「Script error.」（行数0）は無視する
+    if (e.lineno === 0 && e.message === "Script error.") return;
+    showError(`${e.message} (${e.lineno}行目)`);
+  });
   window.addEventListener("unhandledrejection", e => showError(String(e.reason)));
 </script>
 <div class="wrap">
